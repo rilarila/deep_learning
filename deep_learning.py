@@ -12,48 +12,38 @@ import theano
 import theano.tensor as T
 
 class Model(object):
-    def updates(self,learning_rate):
-        return [(param, param - learning_rate * T.grad(self.cost,param)) for param in self.params]
-
-    def get_input(self):
+    def __init__(self,n_in,learning_rate):
         print('... building the model')
 
+        self.L = numpy.zeros(2,dtype=object)
+        self.params = []
         self.input_variable = T.matrix('x')
         self.output_variable = T.ivector('y')
+        self.cost = 0
 
-        return self.input_variable
+        self.n_in = n_in
+        self.input = self.input_variable
 
-    def build(self,cost_addition=0):
-        self.output = self.get_output()
-        self.base_cost = self.get_base_cost()
-        self.cost = self.base_cost+cost_addition
-        self.score = self.get_score()
+        self.learning_rate = learning_rate
 
-class Regression(Model):
-    def get_output(self):
-        return self.output_layer.output.flatten()
+    def get_updates(self):
+        return [(param, param - self.learning_rate * T.grad(self.cost,param)) for param in self.params]
 
-    def get_base_cost(self):
-        return T.mean(abs(self.output - self.output_variable))
+def Regression(network):
+    network.output = network.output_layer.output.flatten()
 
-    def get_score(self):
-        param = 1.0
-        return T.mean(param/(self.base_cost+param))
+    base_cost = T.mean(abs(network.output - network.output_variable))
+    param = 1
 
-class Classifier(Model):
-    def get_p_y_given_x(self):
-        if not hasattr(self,'p_y_given_x'):
-            self.p_y_given_x = T.nnet.softmax(self.output_layer.output)
-        return self.p_y_given_x
+    network.cost += base_cost
+    network.score = T.mean(param/(base_cost+param))
 
-    def get_output(self):
-        return T.argmax(self.get_p_y_given_x(), axis=1)
+def Classifier(network):
+    p_y_given_x = T.nnet.softmax(network.output_layer.output)
 
-    def get_base_cost(self):
-        return -T.mean(T.log(self.get_p_y_given_x())[T.arange(self.output_variable.shape[0]), self.output_variable])
-
-    def get_score(self):
-        return T.mean(T.eq(self.output, self.output_variable))
+    network.output = T.argmax(p_y_given_x, axis=1)
+    network.cost += -T.mean(T.log(p_y_given_x)[T.arange(network.output_variable.shape[0]), network.output_variable])
+    network.score = T.mean(T.eq(network.output, network.output_variable))
 
 class Layer(object):
     def __init__(self, input, n_in, n_out, activation=(lambda x: x), rng=None):
@@ -76,18 +66,11 @@ class Layer(object):
 
         self.output = activation(T.dot(input, W) + b)
 
-        self.L1 = abs(W).sum()
-        self.L2 = (W ** 2).sum()
+        self.L = numpy.array([abs(W).sum(),(W ** 2).sum()])
 
 
-def load_data(dataset,num=None):
-    data_dir, data_file = os.path.split(dataset)
+def load_data(dataset,num=None,distribution=[5,1,1]):
     print('... loading data')
-
-    with gzip.open(dataset, 'rb') as f:
-        sets = pickle.load(f)
-        if num != None:
-            sets = [[j[:num] for j in i] for i in sets]
 
     def shared_dataset(data_xy, borrow=True):
         data_x, data_y = data_xy
@@ -95,160 +78,112 @@ def load_data(dataset,num=None):
                                                dtype=theano.config.floatX),
                                  borrow=borrow)
         shared_y = theano.shared(numpy.asarray(data_y,
-                                               dtype=theano.config.floatX),
+                                               dtype='int32'),
                                  borrow=borrow)
-        return shared_x, T.cast(shared_y, 'int32')
+        return {'x':shared_x, 'y':T.cast(shared_y, 'int32'),'num':len(data_x)}
 
-    return [shared_dataset(i) for i in sets]
+    with gzip.open(dataset, 'rb') as f:
+        sets = pickle.load(f)
+        data = {}
+        if os.path.split(dataset)[-1] == 'mnist.pkl.gz':
+            if num != None:
+                sets = [[j[:num] for j in i] for i in sets]
 
-def train(classifier,learning_rate,datasets,batch_size,n_epochs,classifier_dump='best_model.pkl'):
+            data['train'] = shared_dataset(sets[0])
+            data['valid'] = shared_dataset(sets[1])
+            data['test']  = shared_dataset(sets[2])
+
+            data['n_in'] = len(sets[0][0][0])
+
+        else:
+            raise NotImplementedError('other data source: %s' % dataset)
+
+    return data
+
+def train(model,data,batch_size,max_epochs,model_dump='best_model.pkl'):
     print('... training the model')
-    # early-stopping parameters
-    patience = 5000  # look as this many examples regardless
-    patience_increase = 2  # wait this much longer when a new best is
-                                  # found
-    improvement_threshold = 0.995  # a relative improvement of this much is
-                                  # considered significant
 
+    n_train_batches = data['train']['num'] // batch_size
+    n_valid_batches = data['valid']['num'] // batch_size
+    n_test_batches  = data['test'] ['num'] // batch_size
 
-    train_set = datasets[0]
-    valid_set = datasets[1]
-    test_set = datasets[2]
-
-    # compute number of minibatches for training, validation and testing
-    n_train_batches = train_set[1].shape[0].eval() // batch_size
-    n_valid_batches = valid_set[1].shape[0].eval() // batch_size
-    n_test_batches = test_set[1].shape[0].eval() // batch_size
-
-    # allocate symbolic variables for the data
-    index = T.lscalar()  # index to a [mini]batch
+    index = T.lscalar() 
 
     def getGivens(dataset):
         return {
-            classifier.input_variable: dataset[0][index * batch_size: (index + 1) * batch_size],
-            classifier.output_variable: dataset[1][index * batch_size: (index + 1) * batch_size]
+            model.input_variable:  dataset['x'][index * batch_size: (index + 1) * batch_size],
+            model.output_variable: dataset['y'][index * batch_size: (index + 1) * batch_size]
         }
 
-    # compiling a Theano function that computes the mistakes that are made by
-    # the model on a minibatch
     test_model = theano.function(
         inputs=[index],
-        outputs=classifier.score,
-        givens=getGivens(test_set)
+        outputs=model.score,
+        givens=getGivens(data['test'])
     )
 
     validate_model = theano.function(
         inputs=[index],
-        outputs=classifier.score,
-        givens=getGivens(valid_set)
+        outputs=model.score,
+        givens=getGivens(data['valid'])
     )
 
-    # compiling a Theano function `train_model` that returns the cost, but in
-    # the same time updates the parameter of the model based on the rules
-    # defined in `updates`
     train_model = theano.function(
         inputs=[index],
-        outputs=classifier.cost,
-        updates=classifier.updates(learning_rate),
-        givens=getGivens(train_set)
+        updates=model.get_updates(),
+        givens=getGivens(data['train'])
     )
-    # end-snippet-3
 
-    validation_frequency = min(n_train_batches, patience // 2)
-                                  # go through this many
-                                  # minibatche before checking the network
-                                  # on the validation set; in this case we
-                                  # check every epoch
+    n_epochs = max_epochs
+    epoch_increase = 2
+    improvement_threshold = 0.995
 
     best_validation_score = 0.
     test_score = 0.
     start_time = timeit.default_timer()
 
-    done_looping = False
-    epoch = 0
-    while (epoch < n_epochs) and (not done_looping):
-        epoch = epoch + 1
+    for epoch in range(max_epochs):
         for minibatch_index in range(n_train_batches):
+            train_model(minibatch_index)
 
-            minibatch_avg_cost = train_model(minibatch_index)
-            # iteration number
-            iter = (epoch - 1) * n_train_batches + minibatch_index
+        validation_score = numpy.mean([validate_model(i) for i in range(n_valid_batches)])
 
-            if (iter + 1) % validation_frequency == 0:
-                # compute zero-one loss on validation set
-                validation_score = [validate_model(i)
-                                     for i in range(n_valid_batches)]
-                this_validation_score = numpy.mean(validation_score)
+        print('epoch %i, validation score %f%%' % (epoch+1, validation_score*100.))
 
-                print(
-                    'epoch %i, minibatch %i/%i, validation score %f%%' %
-                    (
-                        epoch,
-                        minibatch_index + 1,
-                        n_train_batches,
-                        this_validation_score * 100.
-                    )
-                )
+        if validation_score > best_validation_score:
+            if validation_score > best_validation_score * improvement_threshold:
+                n_epochs = max(n_epochs, epoch * epoch_increase)
 
-                # if we got the best validation score until now
-                if this_validation_score > best_validation_score:
-                    #improve patience if loss improvement is good enough
-                    if this_validation_score > best_validation_score *  \
-                       improvement_threshold:
-                        patience = max(patience, iter * patience_increase)
+            best_validation_score = validation_score
 
-                    best_validation_score = this_validation_score
-                    # test it on the test set
-
-                    test_scores = [test_model(i)
+            test_scores = [test_model(i)
                                    for i in range(n_test_batches)]
-                    test_score = numpy.mean(test_scores)
+            test_score = numpy.mean(test_scores)
 
-                    print(
-                        (
-                            '     epoch %i, minibatch %i/%i, test score of'
-                            ' best model %f%%'
-                        ) %
-                        (
-                            epoch,
-                            minibatch_index + 1,
-                            n_train_batches,
-                            test_score * 100.
-                        )
-                    )
+            print('\tepoch %i, test score of best model %f%%' % (epoch+1, test_score*100.))
 
-                    # save the best model
-                    with open(classifier_dump, 'wb') as f:
-                        pickle.dump(classifier, f)
+            with open(model_dump, 'wb') as f:
+                    pickle.dump(model, f)
 
-            if patience <= iter:
-                done_looping = True
-                break
+        if epoch > n_epochs:
+            break
 
     end_time = timeit.default_timer()
-    print(
-        (
-            'Optimization complete with best validation score of %f%%, '
-            'with test performance %f%%'
-        )
-        % (best_validation_score * 100., test_score * 100.)
-    )
-    print('The code run for %d epochs, with %f epochs/sec' % (
-        epoch, 1. * epoch / (end_time - start_time)))
-    print(('The code for file ' +
-           os.path.split(__file__)[1] +
-           ' ran for %.1fs' % ((end_time - start_time))), file=sys.stderr)
 
-def predict(classifier_dump='best_model.pkl', dataset='mnist.pkl.gz',num=10): 
-    classifier = pickle.load(open(classifier_dump))
+    print('Optimization complete with best validation score of %f%%, test score %f%%' % (best_validation_score * 100., test_score * 100))
+
+    print('The code run for %d epochs, with %f epochs/sec' % (epoch+1, (epoch+1.) / (end_time - start_time)))
+    print('The code for file ' + os.path.split(__file__)[1] + ' ran for %.1fs' % (end_time - start_time))
+
+def predict(dataset, model_dump='best_model.pkl',num=10): 
+    model = pickle.load(open(model_dump))
  
     predict_model = theano.function( 
-        inputs=[classifier.input_variable], 
-        outputs=classifier.output) 
- 
-    test_set_x, test_set_y = load_data(dataset,num)[2] 
+        inputs=[model.input_variable], 
+        outputs=model.output) 
 
-    predicted_values = predict_model(test_set_x.eval()) 
-    actual_values = test_set_y.eval()
+    test_set = load_data(dataset,num)['test']
+
+    predicted_values = predict_model(test_set['x'].eval()) 
+    actual_values = test_set['y'].eval()
 
     return {'Predicted values':predicted_values,'Actual values':actual_values}
