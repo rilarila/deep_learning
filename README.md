@@ -47,7 +47,8 @@ print pandas.DataFrame(results).T
 ```
 
 ### Classes and Functions:
-`class MLP(n_in,n_out,features=[],rng=None,L_reg=numpy.array([0.00,0.0001]),learning_rate=0.01)`
+```python
+class MLP(n_in,n_out,features=[],rng=None,L_reg=numpy.array([0.00,0.0001]),learning_rate=0.01)
 	abstract class
 
 	args
@@ -102,7 +103,8 @@ print pandas.DataFrame(results).T
 			args
 				model_dump - string, path to save model
 
-`class Regression(n_in,features=[],rng=None,L_reg=[0.00,0.001],learning_rate=0.01):`
+
+class Regression(n_in,features=[],rng=None,L_reg=[0.00,0.001],learning_rate=0.01):
 	subclass of MLP
 
 	attributes
@@ -110,7 +112,8 @@ print pandas.DataFrame(results).T
 		cost - theano symbolic float
 		score - theano symbolic float
 
-`class Classification(n_in,n_out,features=[],rng=None,L_reg=[0.00,0.001],learning_rate=0.01):`
+
+class Classification(n_in,n_out,features=[],rng=None,L_reg=[0.00,0.001],learning_rate=0.01):
 	subclass of MLP
 
 	attributes		
@@ -118,7 +121,8 @@ print pandas.DataFrame(results).T
 		cost - theano symbolic float
 		score - theano symbolic float
 
-`class Layer(input, n_in, n_out, activation=(lambda x: x), rng=None):`
+
+class Layer(input, n_in, n_out, activation=(lambda x: x), rng=None):
 	args
 		input - theano symbolic matrix
 		n_in - int
@@ -132,7 +136,8 @@ print pandas.DataFrame(results).T
 		L - numpy array<theano expression>
 			[abs(W).sum(), (W ** 2).sum()]
 
-`def format_data(raw_data,regression):`
+
+def format_data(raw_data,regression):
         formats data to contain only floats to prepare for training
 	returns tuple (data,d,n_out)
 		data - numpy matrix of floats
@@ -143,7 +148,8 @@ print pandas.DataFrame(results).T
 		raw_data - numpy matrix where each row contains the data point followed by the true value
 		regression - boolean representing model type
 
-`def load_data(dataset,regression,header=True,true_value_is_last=True,upsampling=False)`
+
+def load_data(dataset,regression,header=True,true_value_is_last=True,upsampling=False)
 	returns dictionary{'data': numpy matrix<float> data, d: dictionary<int,string> transformation of bin to label,'n_in': int number input features, 'n_out': number of output bins, or 1 for regression}
 
 	args
@@ -153,10 +159,11 @@ print pandas.DataFrame(results).T
 		output_value_is_first - boolean, true if output is the first value, false if the output is the last value in each row
 		upsampling - boolean, if true and the model is classification, upsamples data to have an equal number of data points for each bin
 
+
 #### TODO - currently only uses python pickle
-`def load_model(model_dump):`
+def load_model(model_dump):
 	returns model saved using dump_model at location model_dump
 
 	args
 		model_dump - string, path to load model
-
+```
