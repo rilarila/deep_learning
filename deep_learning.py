@@ -1,6 +1,7 @@
 from __future__ import print_function
 
 import six.moves.cPickle as pickle
+import csv
 import gzip
 import os
 import sys
@@ -12,178 +13,275 @@ import theano
 import theano.tensor as T
 
 class Model(object):
-    def __init__(self,n_in,learning_rate):
-        print('... building the model')
+	def __init__(self,n_in,L_reg,learning_rate):
+		print('... building the model')
 
-        self.L = numpy.zeros(2,dtype=object)
-        self.params = []
-        self.input_variable = T.matrix('x')
-        self.output_variable = T.ivector('y')
-        self.cost = 0
+		self.L_reg = numpy.array(L_reg)
+		self.params = []
+		self.input_variable = T.matrix('x')
+		self.output_variable = T.vector('y')
+		self.cost = 0
 
-        self.n_in = n_in
-        self.input = self.input_variable
+		self.layer_n_out = n_in
+		self.layer_output = self.input_variable
 
-        self.learning_rate = learning_rate
+		self.learning_rate = learning_rate
 
-    def get_updates(self):
-        return [(param, param - self.learning_rate * T.grad(self.cost,param)) for param in self.params]
+	def get_updates(self):
+		return [(param, param - self.learning_rate * T.grad(self.cost,param)) for param in self.params]
 
-def Regression(network):
-    network.output = network.output_layer.output.flatten()
+	def make_regression(self):
+		self.output = self.output_layer.output.flatten()
 
-    base_cost = T.mean(abs(network.output - network.output_variable))
-    param = 1
+		base_cost = T.mean(abs(self.output - self.output_variable))
+		param = 1
 
-    network.cost += base_cost
-    network.score = T.mean(param/(base_cost+param))
+		self.cost += base_cost
+		self.score = (param/(base_cost+param))
 
-def Classifier(network):
-    p_y_given_x = T.nnet.softmax(network.output_layer.output)
+		self.type = 'regression'
 
-    network.output = T.argmax(p_y_given_x, axis=1)
-    network.cost += -T.mean(T.log(p_y_given_x)[T.arange(network.output_variable.shape[0]), network.output_variable])
-    network.score = T.mean(T.eq(network.output, network.output_variable))
+	def make_classifier(self):
+		p_y_given_x = T.nnet.softmax(self.output_layer.output)
+
+		self.output = T.argmax(p_y_given_x, axis=1)
+		self.cost += -T.mean(T.log(p_y_given_x)[T.arange(self.output_variable.shape[0]), self.output_variable.astype('int32')])
+		self.score = T.mean(T.eq(self.output, self.output_variable))
+
+		self.type = 'classification'
+
+	def train(self,data,batch_size,max_epochs,distribution={'train':5./7,'valid':1./7,'test':1./7},model_dump='best_model.pkl'):
+		print('... training the model')
+
+		def partition(data,distribution):
+			s = sum(distribution.values())
+			distribution = {i:distribution[i]/float(s) for i in distribution}
+
+			def shared_dataset(data, borrow=True):
+				shared_x = theano.shared(data[:,:-1],borrow=borrow)
+				shared_y = theano.shared(data[:,-1],borrow=borrow)
+				return {'x':shared_x, 'y':shared_y,'num':len(data)}
+
+			partitioned_data = {}
+			n = len(data)
+			start = 0
+			for i in distribution:
+				end = int(start + distribution[i]*n)
+				partitioned_data[i] = shared_dataset(data[start:end])
+				start = end
+			return partitioned_data
+
+		partitioned_data = partition(data,distribution) 
+
+		n_train_batches = partitioned_data['train']['num'] // batch_size
+		n_valid_batches = partitioned_data['valid']['num'] // batch_size
+		n_test_batches  = partitioned_data['test'] ['num'] // batch_size
+
+		index = T.lscalar() 
+
+		def getGivens(dataset):
+			return {
+				self.input_variable:  dataset['x'][index * batch_size: (index + 1) * batch_size],
+				self.output_variable: dataset['y'][index * batch_size: (index + 1) * batch_size]
+			}
+
+		test_model = theano.function(
+			inputs=[index],
+			outputs=self.score,
+			givens=getGivens(partitioned_data['test'])
+		)
+
+		validate_model = theano.function(
+			inputs=[index],
+			outputs=self.score,
+			givens=getGivens(partitioned_data['valid'])
+		)
+
+		train_model = theano.function(
+			inputs=[index],
+			updates=self.get_updates(),
+			givens=getGivens(partitioned_data['train'])
+		)
+
+		n_epochs = max_epochs
+		epoch_increase = 2
+		improvement_threshold = 0.995
+
+		best_validation_score = 0.
+		test_score = 0.
+		start_time = timeit.default_timer()
+
+		for epoch in range(max_epochs):
+			for minibatch_index in range(n_train_batches):
+				train_model(minibatch_index)
+
+			validation_score = numpy.mean([validate_model(i) for i in range(n_valid_batches)])
+
+			print('epoch %i, validation score %f%%' % (epoch+1, validation_score*100.))
+
+			if validation_score > best_validation_score:
+				if validation_score > best_validation_score * improvement_threshold:
+					n_epochs = max(n_epochs, epoch * epoch_increase)
+
+				best_validation_score = validation_score
+
+				if n_test_batches > 0:
+					test_scores = [test_model(i) for i in range(n_test_batches)]
+					test_score = numpy.mean(test_scores)
+
+					print('\tepoch %i, test score of best model %f%%' % (epoch+1, test_score*100.))
+
+				self.dump(model_dump)
+
+			if epoch > n_epochs:
+				break
+
+		end_time = timeit.default_timer()
+
+		print('Optimization complete with best validation score of %f%%, test score %f%%' % (best_validation_score * 100., test_score * 100))
+
+		print('The code run for %d epochs, with %f epochs/sec' % (epoch+1, (epoch+1.) / (end_time - start_time)))
+		print('The code for file ' + os.path.split(__file__)[1] + ' ran for %.1fs' % (end_time - start_time))
+
+	def predict(self,data,d={}): 
+		predict_model = theano.function( 
+			inputs=[self.input_variable], 
+			outputs=self.output)
+
+		def f(bin_num):
+			if bin_num in d:
+				return d[bin_num]
+			return bin_num
+
+		f = numpy.vectorize(f)
+
+		x = data[:,:-1]
+		y = f(data[:,-1])
+
+		predicted_values = f(predict_model(x))
+
+		results = {'Predicted values':predicted_values,'Actual values': y}
+
+		return results
+
+	def dump(self,model_dump):
+		with open(model_dump,'wb') as f:
+			pickle.dump(self,f)
+
+class MLP(Model):
+	def __init__(self,n_in,n_out,features=[],rng=None,L_reg=[0.00,0.0001],learning_rate=0.01):
+
+		super(self.__class__, self).__init__(n_in,L_reg,learning_rate)
+
+		if rng is None:
+			rng = numpy.random.RandomState(1234)
+		self.rng = rng
+
+		for layer_n_out in features:
+			self.add_layer(layer_n_out,T.tanh)
+
+		self.add_layer(n_out)
+
+		if  n_out == 1:
+			self.make_regression()
+		else:
+			self.make_classifier()
+
+	def add_layer(self,n_out,activation=None):
+		if activation is not None:
+			layer = Layer(self.layer_output,self.layer_n_out,n_out,activation=activation,rng=self.rng)
+		else:
+			layer = Layer(self.layer_output,self.layer_n_out,n_out)
+
+		self.params += layer.params
+		self.cost += sum(self.L_reg * layer.L)
+		self.layer_output = layer.output
+		self.layer_n_out = n_out
+
+		self.output_layer = layer
 
 class Layer(object):
-    def __init__(self, input, n_in, n_out, activation=(lambda x: x), rng=None):
-        if rng is None:
-            W_values = numpy.zeros((n_in,n_out),dtype=theano.config.floatX)
-        else:
-            bound = numpy.sqrt(6. / (n_in + n_out))
-            W_values = numpy.asarray(rng.uniform(low=-bound,high=bound,size=(n_in,n_out)))
+	def __init__(self, input, n_in, n_out, activation=(lambda x: x), rng=None):
+		if rng is None:
+			W_values = numpy.zeros((n_in,n_out),dtype=theano.config.floatX)
+		else:
+			bound = numpy.sqrt(6. / (n_in + n_out))
+			W_values = numpy.asarray(rng.uniform(low=-bound,high=bound,size=(n_in,n_out)))
 
-            if activation == theano.tensor.nnet.sigmoid:
-                W_values *= 4
+			if activation == theano.tensor.nnet.sigmoid:
+				W_values *= 4
 
-        b_values = numpy.zeros((n_out,),dtype=theano.config.floatX)
+		b_values = numpy.zeros((n_out,),dtype=theano.config.floatX)
 
-        W = theano.shared(value=W_values, name='W', borrow=True)
+		W = theano.shared(value=W_values, name='W', borrow=True)
 
-        b = theano.shared(value=b_values, name='b', borrow=True)
+		b = theano.shared(value=b_values, name='b', borrow=True)
 
-        self.params = [W,b]
+		self.params = [W,b]
 
-        self.output = activation(T.dot(input, W) + b)
+		self.output = activation(T.dot(input, W) + b)
 
-        self.L = numpy.array([abs(W).sum(),(W ** 2).sum()])
+		self.L = numpy.array([abs(W).sum(),(W ** 2).sum()])
 
+def format_data(raw_data,regression):
 
-def load_data(dataset,num=None,distribution=[5,1,1]):
-    print('... loading data')
+	def unlabel(row):
+		try:
+			return row.astype('float')
+		except ValueError:
+			labels = list(set(row))
+			shift = int(2**(len(labels).bit_length()))
+			d = {labels[i]:[int(j) for j in bin(shift+i)[3:]] for i in range(len(labels))}
+			return numpy.array([d[i] for i in row])
 
-    def shared_dataset(data_xy, borrow=True):
-        data_x, data_y = data_xy
-        shared_x = theano.shared(numpy.asarray(data_x,
-                                               dtype=theano.config.floatX),
-                                 borrow=borrow)
-        shared_y = theano.shared(numpy.asarray(data_y,
-                                               dtype='int32'),
-                                 borrow=borrow)
-        return {'x':shared_x, 'y':T.cast(shared_y, 'int32'),'num':len(data_x)}
+	x = numpy.column_stack([unlabel(i) for i in raw_data[:,:-1].T])
 
-    with gzip.open(dataset, 'rb') as f:
-        sets = pickle.load(f)
-        data = {}
-        if os.path.split(dataset)[-1] == 'mnist.pkl.gz':
-            if num != None:
-                sets = [[j[:num] for j in i] for i in sets]
+	if regression:
+		d = {}
+		y = raw_data[:,-1].astype('float')
+		n_out = 1
 
-            data['train'] = shared_dataset(sets[0])
-            data['valid'] = shared_dataset(sets[1])
-            data['test']  = shared_dataset(sets[2])
+	else:
+		raw_y = raw_data[:,-1]
+		values = list(set(raw_y))
+		d_reverse = {values[i]:i for i in range(len(values))}
+		y = [d_reverse[i] for i in raw_y]
+		d = {j:i for (i,j) in d_reverse.items()}
+		n_out = len(d)
 
-            data['n_in'] = len(sets[0][0][0])
+	data = numpy.column_stack([x, y])
 
-        else:
-            raise NotImplementedError('other data source: %s' % dataset)
+	return (data, d, n_out)
 
-    return data
+def load_data(dataset,regression,header=True,output_value_is_first=False):
+	print('... loading data')
 
-def train(model,data,batch_size,max_epochs,model_dump='best_model.pkl'):
-    print('... training the model')
+	if os.path.split(dataset)[-1] == 'mnist.pkl.gz':
+		with gzip.open(dataset, 'rb') as f:
+			loaded = pickle.load(f)
 
-    n_train_batches = data['train']['num'] // batch_size
-    n_valid_batches = data['valid']['num'] // batch_size
-    n_test_batches  = data['test'] ['num'] // batch_size
+		data = numpy.vstack([numpy.c_[i] for i in loaded])
+		d = {}
+		n_out = 1 if regression else 10
 
-    index = T.lscalar() 
+	else:
+		with open(dataset) as f:
+			values = [i for i in csv.reader(f)]
 
-    def getGivens(dataset):
-        return {
-            model.input_variable:  dataset['x'][index * batch_size: (index + 1) * batch_size],
-            model.output_variable: dataset['y'][index * batch_size: (index + 1) * batch_size]
-        }
+		if header:
+			values = values[1:]
 
-    test_model = theano.function(
-        inputs=[index],
-        outputs=model.score,
-        givens=getGivens(data['test'])
-    )
+		raw_data = numpy.array(values)
 
-    validate_model = theano.function(
-        inputs=[index],
-        outputs=model.score,
-        givens=getGivens(data['valid'])
-    )
+		if output_value_is_first:
+			raw_data = numpy.roll(raw_data,-1,1)
 
-    train_model = theano.function(
-        inputs=[index],
-        updates=model.get_updates(),
-        givens=getGivens(data['train'])
-    )
+		data, d, n_out = format_data(raw_data,regression)
 
-    n_epochs = max_epochs
-    epoch_increase = 2
-    improvement_threshold = 0.995
+	return {'data':data,'d':d,'n_out':n_out}
 
-    best_validation_score = 0.
-    test_score = 0.
-    start_time = timeit.default_timer()
+def load_model(model_dump):
+	with open(model_dump,'rb') as f:
+		model = pickle.load(f)
 
-    for epoch in range(max_epochs):
-        for minibatch_index in range(n_train_batches):
-            train_model(minibatch_index)
-
-        validation_score = numpy.mean([validate_model(i) for i in range(n_valid_batches)])
-
-        print('epoch %i, validation score %f%%' % (epoch+1, validation_score*100.))
-
-        if validation_score > best_validation_score:
-            if validation_score > best_validation_score * improvement_threshold:
-                n_epochs = max(n_epochs, epoch * epoch_increase)
-
-            best_validation_score = validation_score
-
-            test_scores = [test_model(i)
-                                   for i in range(n_test_batches)]
-            test_score = numpy.mean(test_scores)
-
-            print('\tepoch %i, test score of best model %f%%' % (epoch+1, test_score*100.))
-
-            with open(model_dump, 'wb') as f:
-                    pickle.dump(model, f)
-
-        if epoch > n_epochs:
-            break
-
-    end_time = timeit.default_timer()
-
-    print('Optimization complete with best validation score of %f%%, test score %f%%' % (best_validation_score * 100., test_score * 100))
-
-    print('The code run for %d epochs, with %f epochs/sec' % (epoch+1, (epoch+1.) / (end_time - start_time)))
-    print('The code for file ' + os.path.split(__file__)[1] + ' ran for %.1fs' % (end_time - start_time))
-
-def predict(dataset, model_dump='best_model.pkl',num=10): 
-    model = pickle.load(open(model_dump))
- 
-    predict_model = theano.function( 
-        inputs=[model.input_variable], 
-        outputs=model.output) 
-
-    test_set = load_data(dataset,num)['test']
-
-    predicted_values = predict_model(test_set['x'].eval()) 
-    actual_values = test_set['y'].eval()
-
-    return {'Predicted values':predicted_values,'Actual values':actual_values}
+	return model
