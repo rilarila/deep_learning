@@ -12,8 +12,8 @@ import numpy
 import theano
 import theano.tensor as T
 
-class Model(object):
-	def __init__(self,n_in,L_reg,learning_rate):
+class MLP(object):
+	def __init__(self,n_in,n_out,features=[],rng=None,L_reg=[0.00,0.0001],learning_rate=0.01):
 		print('... building the model')
 
 		self.L_reg = numpy.array(L_reg)
@@ -27,28 +27,30 @@ class Model(object):
 
 		self.learning_rate = learning_rate
 
+		if rng is None:
+			rng = numpy.random.RandomState(1234)
+		self.rng = rng
+
+		for layer_n_out in features:
+			self.add_layer(layer_n_out,T.tanh)
+
+		self.add_layer(n_out)
+
+	def add_layer(self,n_out,activation=None):
+		if activation is not None:
+			layer = Layer(self.layer_output,self.layer_n_out,n_out,activation=activation,rng=self.rng)
+		else:
+			layer = Layer(self.layer_output,self.layer_n_out,n_out)
+
+		self.params += layer.params
+		self.cost += sum(self.L_reg * layer.L)
+		self.layer_output = layer.output
+		self.layer_n_out = n_out
+
+		self.output_layer = layer
+
 	def get_updates(self):
 		return [(param, param - self.learning_rate * T.grad(self.cost,param)) for param in self.params]
-
-	def make_regression(self):
-		self.output = self.output_layer.output.flatten()
-
-		base_cost = T.mean(abs(self.output - self.output_variable))
-		param = 1
-
-		self.cost += base_cost
-		self.score = (param/(base_cost+param))
-
-		self.type = 'regression'
-
-	def make_classifier(self):
-		p_y_given_x = T.nnet.softmax(self.output_layer.output)
-
-		self.output = T.argmax(p_y_given_x, axis=1)
-		self.cost += -T.mean(T.log(p_y_given_x)[T.arange(self.output_variable.shape[0]), self.output_variable.astype('int32')])
-		self.score = T.mean(T.eq(self.output, self.output_variable))
-
-		self.type = 'classification'
 
 	def train(self,data,batch_size,max_epochs,distribution={'train':5./7,'valid':1./7,'test':1./7},model_dump='best_model.pkl'):
 		print('... training the model')
@@ -168,37 +170,27 @@ class Model(object):
 		with open(model_dump,'wb') as f:
 			pickle.dump(self,f)
 
-class MLP(Model):
+class Regression(MLP):
+	def __init__(self,n_in,features=[],rng=None,L_reg=[0.00,0.0001],learning_rate=0.01):
+		super(self.__class__, self).__init__(n_in,1,features,rng,L_reg,learning_rate)
+
+		self.output = self.output_layer.output.flatten()
+
+		base_cost = T.mean((self.output - self.output_variable)**2)
+		param = 1
+
+		self.cost += base_cost
+		self.score = (param/(base_cost+param))
+
+class Classification(MLP):
 	def __init__(self,n_in,n_out,features=[],rng=None,L_reg=[0.00,0.0001],learning_rate=0.01):
+		super(self.__class__, self).__init__(n_in,n_out,features,rng,L_reg,learning_rate)
 
-		super(self.__class__, self).__init__(n_in,L_reg,learning_rate)
+		p_y_given_x = T.nnet.softmax(self.output_layer.output)
 
-		if rng is None:
-			rng = numpy.random.RandomState(1234)
-		self.rng = rng
-
-		for layer_n_out in features:
-			self.add_layer(layer_n_out,T.tanh)
-
-		self.add_layer(n_out)
-
-		if  n_out == 1:
-			self.make_regression()
-		else:
-			self.make_classifier()
-
-	def add_layer(self,n_out,activation=None):
-		if activation is not None:
-			layer = Layer(self.layer_output,self.layer_n_out,n_out,activation=activation,rng=self.rng)
-		else:
-			layer = Layer(self.layer_output,self.layer_n_out,n_out)
-
-		self.params += layer.params
-		self.cost += sum(self.L_reg * layer.L)
-		self.layer_output = layer.output
-		self.layer_n_out = n_out
-
-		self.output_layer = layer
+		self.output = T.argmax(p_y_given_x, axis=1)
+		self.cost += -T.mean(T.log(p_y_given_x)[T.arange(self.output_variable.shape[0]), self.output_variable.astype('int32')])
+		self.score = T.mean(T.eq(self.output, self.output_variable))
 
 class Layer(object):
 	def __init__(self, input, n_in, n_out, activation=(lambda x: x), rng=None):
@@ -232,7 +224,11 @@ def format_data(raw_data,regression):
 			labels = list(set(row))
 			shift = int(2**(len(labels).bit_length()))
 			d = {labels[i]:[int(j) for j in bin(shift+i)[3:]] for i in range(len(labels))}
+			'''
+			d = {labels[i]:[int(j==i) for j in range(len(labels))] for i in range(len(labels))}
+			'''
 			return numpy.array([d[i] for i in row])
+			
 
 	x = numpy.column_stack([unlabel(i) for i in raw_data[:,:-1].T])
 
@@ -253,7 +249,7 @@ def format_data(raw_data,regression):
 
 	return (data, d, n_out)
 
-def load_data(dataset,regression,header=True,output_value_is_first=False):
+def load_data(dataset,regression,header=True,output_value_is_first=False,upsampling=False):
 	print('... loading data')
 
 	if os.path.split(dataset)[-1] == 'mnist.pkl.gz':
@@ -277,6 +273,11 @@ def load_data(dataset,regression,header=True,output_value_is_first=False):
 			raw_data = numpy.roll(raw_data,-1,1)
 
 		data, d, n_out = format_data(raw_data,regression)
+
+		if upsampling and not regression:
+			freq = Counter(data[:,-1])
+			n = max(freq.values())
+			
 
 	return {'data':data,'d':d,'n_out':n_out}
 
