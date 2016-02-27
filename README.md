@@ -3,47 +3,42 @@
 ### Typical use:
 ```python
 import pandas
+
+
 dataset = 'mnist.pkl.gz'
 loaded_data = load_data(dataset,regression=False)
-n_in = loaded_data['data'].shape[1]-1
-model = Classification(n_in,loaded_data['n_out'],[50,20])
 data = loaded_data['data']
+
+n_in = data.shape[1]-1
+n_out = loaded_data['n_out']
+
+model = Classification(n_in,n_out,[50,20])
 model.train(data,batch_size = 20, max_epochs = 100)
+
 results = model.predict(data[:100])
-print pandas.DataFrame(results).T
+print(pandas.DataFrame(results).T)
 
 
-import pandas
+
+
 dataset = 'heart.csv'
 loaded_data = load_data(dataset,regression=True,header=True)
-n_in = loaded_data['data'].shape[1]-1
+data = loaded_data['data']
+
+n_in = data.shape[1]-1
+
 model = Regression(n_in,[10])
-data = loaded_data['data']
 model.train(data,batch_size = 10, max_epochs = 1000)
+
 results = model.predict(data[:100],loaded_data['d'])
-print pandas.DataFrame(results).T
+print(pandas.DataFrame(results).T)
 
 
-import pandas
+
+
 dataset = 'credit.csv'
-loaded_data = load_data(dataset,regression=True,header=True,output_value_is_first=True)
-n_in = loaded_data['data'].shape[1]-1
-model = Regression(n_in,[10])
-data = loaded_data['data']
-model.train(data,batch_size = 10, max_epochs = 1000)
-results = model.predict(data[:100],loaded_data['d'])
-print pandas.DataFrame(results).T
+output = easy_deep_learning(dataset,regression=False,depth=3,max_epochs=5,predict_count=100)
 
-
-import pandas
-dataset = 'credit.csv'
-loaded_data = load_data(dataset,regression=False,header=True,output_value_is_first=True)
-n_in = loaded_data['data'].shape[1]-1
-model = Classification(n_in,loaded_data['n_out'],[10])
-data = loaded_data['data']
-model.train(data,batch_size = 10, max_epochs = 1000)
-results = model.predict(data[:100],loaded_data['d'])
-print pandas.DataFrame(results).T
 ```
 
 ### Classes and Functions:
