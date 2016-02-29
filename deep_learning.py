@@ -319,12 +319,34 @@ def _partition(data,distribution,borrow=True):
 	return partitioned_data
 
 def repeats(this,max_count):
-	return [max_count/this + int(i < (max_count % this)) for i in range(this)]
+	return [max_count/this - 1 + int(i < (max_count % this)) for i in range(this)]
 
 
-def _upsample(data):
-	data = data[data[:,-1].argsort()]
+def _upsample(original):
+	data = original[original[:,-1].argsort()]
 
 	split = numpy.split(data,numpy.where(numpy.diff(data[:,-1]))[0]+1)
 
 	max_count = max([len(i) for i in split])
+
+	add = numpy.vstack([numpy.repeat(i,[max_count/len(i) - 1 + int(j < (max_count % len(i))) for j in range(len(i))],axis=0) for i in split])
+
+	return numpy.append(original,add,axis=0)
+
+
+
+import pandas
+
+
+dataset = 'mnist.pkl.gz'
+loaded_data = load_data(dataset,regression=False)
+data = loaded_data['data']
+
+n_in = data.shape[1]-1
+n_out = loaded_data['n_out']
+
+model = Classification(n_in,n_out,[50,20])
+model.train(data,batch_size = 20, max_epochs = 3)
+
+results = model.predict(data[:100])
+print(pandas.DataFrame(results).T)
